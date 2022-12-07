@@ -1,0 +1,173 @@
+trigger:
+- main
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  databricks.cluster.name : "Shanmukha Garimella's Cluster"
+  databricks.cluster.id: 
+  databricks.cluster.spark_version: 5.5.x-cpu-ml-scala2.11
+  databricks.cluster.node_type_id: Standard_DS3_v2
+  databricks.cluster.driver_node_type_id: Standard_DS3_v2
+  databricks.cluster.autotermination_minutes: 15
+  databricks.cluster.workers.min: 1
+  databricks.cluster.workers.max: 4
+  databricks.job.name: "demo"
+  databricks.job.id:
+  databricks.NoteBook.path: "/Users/shanmukha.garime@tigeranalytics.com/demo/test2.py"
+  databricks.requirement.path: "/Repos/shanmukha.garime@tigeranalytics.com/marsoddaproject-dev-CI-shanmukha/requirement.txt"
+
+steps:
+
+- script: echo Hello, world!
+  displayName: 'Run a one-line script'
+
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.8'
+    addToPath: true
+    architecture: 'x64'
+
+- script: |
+    pip install -U databricks-cli
+  displayName: 'Run a multi-line script'
+
+
+- task: Bash@3
+  displayName: "Installing the requirements"
+  inputs:
+    targetType: 'inline'
+    script: 'pip install -r requirement.txt'
+
+- script: |
+    echo "$(databricksHost)
+    $(databricksToken)" | databricks configure --token
+  displayName: 'databricks configuration'
+
+- script: |
+    databricks workspace ls
+  displayName: 'workspace'
+
+- task: Bash@3
+  displayName: 'Create / Get Cluster'
+  inputs:
+        targetType: 'inline'
+        script: |
+          cluster_id=$(databricks clusters list | grep "$(databricks.cluster.name)" | awk '{print $1}')
+          
+          if [ -z "$cluster_id" ]
+          then
+          JSON=`cat << EOM
+          {
+            "cluster_name": "$(databricks.cluster.name)",
+            "spark_version": "$(databricks.cluster.spark_version)",
+            "spark_conf": {
+              "spark.databricks.delta.preview.enabled": "true"
+            },
+            "node_type_id": "$(databricks.cluster.node_type_id)",
+            "driver_node_type_id": "$(databricks.cluster.driver_node_type_id)",
+            "spark_env_vars": {
+              "PYSPARK_PYTHON": "/databricks/python3/bin/python3"
+            },
+            "autotermination_minutes": $(databricks.cluster.autotermination_minutes),
+            "enable_elastic_disk": true,
+            "autoscale": {
+              "min_workers": $(databricks.cluster.workers.min),
+              "max_workers": $(databricks.cluster.workers.max)
+            },
+            "init_scripts_safe_mode": false
+          }
+          EOM`
+          
+          cluster_id=$(databricks clusters create --json "$JSON" | jq -r ".cluster_id")
+          sleep 10
+          fi
+          
+          echo "##vso[task.setvariable variable=databricks.cluster.id;]$cluster_id"
+          echo "Done"
+- task: Bash@3
+  displayName: 'Start Cluster'
+  inputs:
+        targetType: 'inline'
+        script: |
+          echo "Checking Cluster State (Cluster ID: $(databricks.cluster.id))..."
+          cluster_state=$(databricks clusters get --cluster-id "$(databricks.cluster.id)" | jq -r ".state")
+          echo "Cluster State: $cluster_state"
+          
+          if [ $cluster_state == "TERMINATED" ]
+          then
+            echo "Starting Databricks Cluster..."
+            databricks clusters start --cluster-id "$(databricks.cluster.id)"
+            sleep 30
+            cluster_state=$(databricks clusters get --cluster-id "$(databricks.cluster.id)" | jq -r ".state")
+            echo "Cluster State: $cluster_state"
+          fi
+          
+          while [ $cluster_state == "PENDING" ]
+          do
+            sleep 30
+            cluster_state=$(databricks clusters get --cluster-id "$(databricks.cluster.id)" | jq -r ".state")
+            echo "Cluster State: $cluster_state"
+          done
+          
+          if [ $cluster_state == "RUNNING" ]
+          then
+            exit 0
+          else
+            exit 1
+          fi
+
+- task: Bash@3
+  displayName: Creating a dir for placing the files
+  inputs:
+    targetType: 'inline'
+    script: 'databricks workspace mkdirs "/Users/shanmukha.garime@tigeranalytics.com/demo"'
+
+- task: Bash@3
+  displayName: Importing the file from Azure Repo to Databricks
+  inputs:
+    targetType: 'inline'
+    script: 'databricks workspace import test2.py /Users/shanmukha.garime@tigeranalytics.com/demo/test2.py -l PYTHON -o'
+
+- task: Bash@3
+  displayName: 'Creating / Getting a job'
+  inputs:
+        targetType: 'inline'
+        script: |
+          echo "Checking Cluster State (Cluster ID: $(databricks.cluster.id))..."
+          job_id=$(databricks jobs list --output JSON|jq '.jobs[] |select(.settings.name == "demo")|.job_id')
+
+          if [ -z "$job_id" ]
+          then 
+          job_id=$(databricks jobs create --json '{"name": "$(databricks.job.name)","existing_cluster_id": "$(databricks.cluster.id)","notebook_task": {"notebook_path": "$(databricks.NoteBook.path)"},"email_notifications": {"on_success": ["shanmukha.garime@tigeranalytics.com"],"on_failure": ["shanmukha.garime@tigeranalytics.com"]}}'|jq '.job_id')
+          echo "##vso[task.setvariable variable=databricks.job.id;]$job_id"
+          else
+          echo "##vso[task.setvariable variable=databricks.job.id;]$job_id"
+          fi
+
+- task: Bash@3
+  displayName: "Pylint Check"
+  inputs:
+    targetType: 'inline'
+    script: 'pylint test2.py'
+  continueOnError: true
+
+
+- task: Bash@3
+  displayName: "code Coverage"
+  inputs:
+    targetType: 'inline'
+    script: 'coverage run test2.py && coverage report -m && coverage html'
+
+- task: Bash@3
+  displayName: "pytest with test code coverage"
+  inputs:
+    targetType: 'inline'
+    script: 'pytest -v --cov=test2'
+- task: Bash@3
+  displayName: 'Running the job'
+  inputs:
+        targetType: 'inline'
+        script: |
+          databricks jobs run-now --job-id $(databricks.job.id)
+
