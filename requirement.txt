@@ -1,0 +1,9 @@
+pylint
+pandas
+numpy
+scikit-learn
+pytest
+coverage
+pytest-cov
+seaborn
+mlflow
